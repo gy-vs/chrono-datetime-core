@@ -47,3 +47,17 @@ test("One and a half week is made of 7 days 3 hours and 30 minutes", () => {
   expect(dur.hours).toBeCloseTo(3, 4);
   expect(dur.minutes).toBeCloseTo(30, 4);
 });
+
+test("Exact amounts roll directly into the higher-order unit of the custom matrix", () => {
+  // 22 business days is exactly 1 month according to the custom matrix
+  const dur = Duration.fromObject({ months: 0, days: 22 }, { matrix: businessMatrix }).normalize();
+
+  expect(dur.toObject()).toEqual({ months: 1, days: 0 });
+
+  // negative durations keep their signs consistent while rolling up
+  const negative = Duration.fromObject(
+    { months: 0, days: -22 },
+    { matrix: businessMatrix }
+  ).normalize();
+  expect(negative.toObject()).toEqual({ months: -1, days: 0 });
+});

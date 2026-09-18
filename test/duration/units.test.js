@@ -60,10 +60,114 @@ test("Duration#shiftTo maintains invalidity", () => {
   expect(dur.invalidReason).toBe("because");
 });
 
-test("Duration#shiftTo without any units no-ops", () => {
+test("Duration#shiftTo without any units normalizes", () => {
   const dur = Duration.fromObject({ years: 3 }).shiftTo();
   expect(dur.isValid).toBe(true);
   expect(dur.toObject()).toEqual({ years: 3 });
+});
+
+test("Duration#shiftTo without any units rolls up like normalize", () => {
+  const dur = Duration.fromObject({ years: 0, days: 367 }).shiftTo();
+  expect(dur.toObject()).toEqual({ years: 1, days: 2 });
+});
+
+test("Duration#shiftTo rolls lower-order units straight into divisible higher-order units", () => {
+  // 12 months is 1 year and 730 days is 2 years; the days must reach the years
+  // directly (730 / 365 = 2) instead of being routed through months, which
+  // would leave a stray 10 days behind (730 days = 24 months and 10 days)
+  expect(
+    Duration.fromObject({ years: 0, months: 12, days: 730 })
+      .shiftTo("years", "months", "days")
+      .toObject()
+  ).toEqual({ years: 3, months: 0, days: 0 });
+});
+
+test("Duration#shiftTo keeps exact millisecond-to-year conversions exact", () => {
+  const oneYear = 365 * 24 * 60 * 60 * 1000;
+
+  expect(
+    Duration.fromMillis(oneYear)
+      .shiftTo("years", "months", "days", "hours", "minutes", "seconds", "milliseconds")
+      .toObject()
+  ).toEqual({
+    years: 1,
+    months: 0,
+    days: 0,
+    hours: 0,
+    minutes: 0,
+    seconds: 0,
+    milliseconds: 0,
+  });
+
+  expect(
+    Duration.fromMillis(5 * oneYear)
+      .shiftTo("years", "months", "days", "hours", "minutes", "seconds", "milliseconds")
+      .toObject()
+  ).toEqual({
+    years: 5,
+    months: 0,
+    days: 0,
+    hours: 0,
+    minutes: 0,
+    seconds: 0,
+    milliseconds: 0,
+  });
+
+  expect(
+    Duration.fromMillis(-12 * oneYear)
+      .shiftTo("years", "months", "days", "hours", "minutes", "seconds", "milliseconds")
+      .toObject()
+  ).toEqual({
+    years: -12,
+    months: 0,
+    days: 0,
+    hours: 0,
+    minutes: 0,
+    seconds: 0,
+    milliseconds: 0,
+  });
+});
+
+test("Duration#normalize rolls units directly into divisible higher-order units", () => {
+  expect(Duration.fromObject({ years: 0, months: 12, days: 0 }).normalize().toObject()).toEqual({
+    years: 1,
+    months: 0,
+    days: 0,
+  });
+  expect(Duration.fromObject({ years: 0, days: 730 }).normalize().toObject()).toEqual({
+    years: 2,
+    days: 0,
+  });
+});
+
+test("Duration#normalize keeps the signs of all units consistent for negative durations", () => {
+  const oneYear = 365 * 24 * 60 * 60 * 1000;
+
+  const normalized = Duration.fromMillis(-12 * oneYear)
+    .shiftTo("years", "months", "days")
+    .toObject();
+  expect(normalized).toEqual({ years: -12, months: 0, days: 0 });
+
+  for (const value of Object.values(normalized)) {
+    expect(value).not.toBeGreaterThan(0);
+  }
+});
+
+test("Duration#shiftTo does not route exact amounts through intermediate units (months/weeks/days)", () => {
+  // 510 days is exactly 17 months at 30 days/month; routing the days through
+  // the 4 weeks/month factor used to produce 18 months and 6 days
+  expect(Duration.fromObject({ months: 0, weeks: 0, days: 510 }).normalize().toObject()).toEqual({
+    months: 17,
+    weeks: 0,
+    days: 0,
+  });
+
+  // the same amount must not come out with mixed signs for negative durations
+  expect(Duration.fromObject({ months: 0, weeks: 0, days: -270 }).normalize().toObject()).toEqual({
+    months: -9,
+    weeks: 0,
+    days: 0,
+  });
 });
 
 test("Duration#shiftTo accumulates when rolling up", () => {

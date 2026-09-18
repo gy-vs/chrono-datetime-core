@@ -151,36 +151,86 @@ function normalizeValues(matrix, vals) {
   // if this is not the case, factor is used to make it so
   const factor = durationToMillis(matrix, vals) < 0 ? -1 : 1;
 
-  orderedUnits.reduceRight((previous, current) => {
-    if (!isUndefined(vals[current])) {
-      if (previous) {
-        const previousVal = vals[previous] * factor;
-        const conv = matrix[current][previous];
+  // units currently represented in the result, ordered from lower- to higher-order
+  const present = reverseUnits.filter((u) => !isUndefined(vals[u]));
 
-        // if (previousVal < 0):
-        // lower order unit is negative (e.g. { years: 2, days: -2 })
-        // normalize this by reducing the higher order unit by the appropriate amount
-        // and increasing the lower order unit
-        // this can never make the higher order unit negative, because this function only operates
-        // on positive durations, so the amount of time represented by the lower order unit cannot
-        // be larger than the higher order unit
-        // else:
-        // lower order unit is positive (e.g. { years: 2, days: 450 } or { years: -2, days: 450 })
-        // in this case we attempt to convert as much as possible from the lower order unit into
-        // the higher order one
-        //
-        // Math.floor takes care of both of these cases, rounding away from 0
-        // if previousVal < 0 it makes the absolute value larger
-        // if previousVal >= it makes the absolute value smaller
-        const rollUp = Math.floor(previousVal / conv);
-        vals[current] += rollUp * factor;
-        vals[previous] -= rollUp * conv * factor;
-      }
-      return current;
-    } else {
-      return previous;
+  // Rolling up lower-order units into higher-order ones.
+  // We process the units from the lowest order up. For each lower-order unit,
+  // we first try to roll the *whole* value directly into a higher-order unit it
+  // divides exactly into (using that unit's direct conversion factor, without
+  // going through any intermediate unit). Only if no such higher-order unit
+  // exists do we roll into the nearest higher-order unit the old way (which may
+  // leave a remainder in the lower-order unit).
+  //
+  // The direct roll-up is what keeps exact relationships exact: for example,
+  // 730 days converts straight into 2 years (730 / 365 = 2) instead of first
+  // becoming 24 months and 10 days via the 30 days/month factor.
+  for (let i = 0; i < present.length; i++) {
+    const current = present[i];
+    let previousVal = vals[current] * factor;
+
+    if (previousVal === 0) {
+      continue;
     }
-  }, null);
+
+    let rolled = false;
+
+    // try the higher-order units from the highest one down, so that a value
+    // dividing exactly into several units lands in the largest possible one
+    for (let j = present.length - 1; j > i; j--) {
+      const higher = present[j];
+      const conv = matrix[higher] && matrix[higher][current];
+
+      if (isUndefined(conv)) {
+        continue;
+      }
+
+      const quotient = previousVal / conv;
+      // an exact, non-zero number of higher-order units; the epsilon absorbs
+      // floating-point noise (e.g. 730 / 365 computed as 2.0000000000000004)
+      const rounded = Math.round(quotient);
+      if (
+        Math.abs(rounded) >= 1 &&
+        Math.abs(quotient - rounded) <= 1e-9 * Math.max(1, Math.abs(quotient))
+      ) {
+        vals[higher] += rounded * factor;
+        vals[current] -= rounded * conv * factor;
+        previousVal = 0;
+        rolled = true;
+        break;
+      }
+    }
+
+    if (rolled) {
+      continue;
+    }
+
+    // otherwise, roll as much as possible into the nearest higher-order unit
+    const higher = present.slice(i + 1).find((u) => matrix[u] && !isUndefined(matrix[u][current]));
+
+    if (higher) {
+      const conv = matrix[higher][current];
+
+      // if (previousVal < 0):
+      // lower order unit is negative (e.g. { years: 2, days: -2 })
+      // normalize this by reducing the higher order unit by the appropriate amount
+      // and increasing the lower order unit
+      // this can never make the higher order unit negative, because this function only operates
+      // on positive durations, so the amount of time represented by the lower order unit cannot
+      // be larger than the higher order unit
+      // else:
+      // lower order unit is positive (e.g. { years: 2, days: 450 } or { years: -2, days: 450 })
+      // in this case we attempt to convert as much as possible from the lower order unit into
+      // the higher order one
+      //
+      // Math.floor takes care of both of these cases, rounding away from 0
+      // if previousVal < 0 it makes the absolute value larger
+      // if previousVal >= it makes the absolute value smaller
+      const rollUp = Math.floor(previousVal / conv);
+      vals[higher] += rollUp * factor;
+      vals[current] -= rollUp * conv * factor;
+    }
+  }
 
   // try to convert any decimals into smaller units if possible
   // for example for { years: 2.5, days: 0, seconds: 0 } we want to get { years: 2, days: 182, hours: 12 }
@@ -773,7 +823,9 @@ export default class Duration {
   /**
    * Reduce this Duration to its canonical representation in its current units.
    * Assuming the overall value of the Duration is positive, this means:
-   * - excessive values for lower-order units are converted to higher-order units (if possible, see first and second example)
+   * - excessive values for lower-order units are converted to higher-order units (if possible, see first and second example).
+   *   When a value divides exactly into a non-adjacent higher-order unit, it converts directly to that
+   *   unit rather than through the units in between (e.g. 730 days becomes 2 years, not 24 months and 10 days)
    * - negative lower-order units are converted to higher order units (there must be such a higher order unit, otherwise
    *   the overall value would be negative, see third example)
    * - fractional values for higher-order units are converted to lower-order units (if possible, see fourth example)
@@ -805,14 +857,22 @@ export default class Duration {
 
   /**
    * Convert this Duration into its representation in a different set of units.
+   *
+   * When a lower-order unit's value divides exactly into a higher-order unit,
+   * it is converted directly into that higher-order unit instead of being
+   * routed through the intermediate units, so no stray remainder is left behind
+   * (e.g. 730 days becomes 2 years, not 24 months and 10 days).
+   *
+   * Called without any units, this is equivalent to {@link Duration#normalize}.
    * @example Duration.fromObject({ hours: 1, seconds: 30 }).shiftTo('minutes', 'milliseconds').toObject() //=> { minutes: 60, milliseconds: 30000 }
+   * @example Duration.fromObject({ years: 0, days: 367 }).shiftTo().toObject() //=> { years: 1, days: 2 }
    * @return {Duration}
    */
   shiftTo(...units) {
     if (!this.isValid) return this;
 
     if (units.length === 0) {
-      return this;
+      return this.normalize();
     }
 
     units = units.map((u) => Duration.normalizeUnit(u));
